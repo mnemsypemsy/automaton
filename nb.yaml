@@ -1,3 +1,35 @@
+nb_netbox_url: ""
+nb_ipam_ip_endpoint: "ipam/ip-addresses"
+nb_ipam_pr_endpoint: "ipam/prefixes"
+
+nb_gw_ident: "Default%20Gateway"
+
+nb_smtp_server: ""
+nb_smtp_from: ""
+
+nb_email_recipeients:
+    -aa@aa.com
+    -bb@bb.com
+
+nb_mailStartTxt: "<b>The Automation failed..</b>"
+nb_mailEndTxt: "<br><br>Please view the log.."
+nb_mailSubject: "Out of IP-Addresses"
+
+nb_automation: "VM-Deploy"
+nb_user: "Ansible"
+nb_role: "Windows Server"
+wm_ip: ""
+
+
+nb_ask_nets: 5
+nb_id: ""
+
+nb_net_role: "server network"
+
+nb_os: "windows"
+nb_zone: "z3"
+nb_hostname: "test"
+
 - block:    
     - name: Get prefix information from NetBox
       uri:
