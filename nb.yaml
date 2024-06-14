@@ -1,0 +1,145 @@
+- block:    
+    - name: Get prefix information from NetBox
+      uri:
+        url: "{{ nb_netbox_url }}/{{nb_ipam_pr_endpoint}}/?tag={{ nb_os | lower }}&cf_zone=Z{{ nb_zone }}&cf_environment={{ nb_env }}&role={{ nb_net_role }}"
+        method: GET
+        headers:
+          Authorization: "Token {{ app_token_netbox }}"
+        validate_certs: no
+      register: net_pr
+      no_log: true
+
+    - name: Set initial retry count
+      set_fact:
+        retries_left: "{{ nb_ask_nets }}"           
+
+    - name: Get next available IP from NetBox
+      uri:
+        url: "{{ nb_netbox_url }}/{{nb_ipam_pr_endpoint}}/{{ item.id }}/available-ips/?limit=1"
+        method: GET
+        headers:
+          Authorization: "Token {{ app_token_netbox }}"
+        validate_certs: no
+      register: next_available_ip
+      loop: "{{ net_pr.json.results }}"
+      loop_control:
+        loop_var: item
+      when: retries_left > 0
+      ignore_errors: true
+      no_log: true
+
+    - name: Check if IP is retrieved successfully
+      set_fact:          
+        next_available_ip_address: "{{ next_available_ip.results | json_query('[].json[0].address') | first }}"
+        nb_id: "{{ next_available_ip.results | json_query('[].item.id') | first }}"       
+        vm_netw_name:  "{{ next_available_ip.results | json_query('[].item.custom_fields.network_name') | first }}" 
+      when: next_available_ip | default([]) | length > 0
+
+    - name: Print next available IP address
+      debug:
+        msg: "Next available IP address: {{ next_available_ip_address }}, in prefix {{nb_id}}."
+
+    - name: Save response data to variables
+      set_fact:
+        address: "{{ next_available_ip_address }}"
+        wm_ip: "{{ next_available_ip_address.split('/')[0] }}"
+        wm_mask: "{{ next_available_ip_address.split('/')[1] }}"
+      
+      when: next_available_ip_address | length > 0   
+    
+    - name: Get Netmask
+      set_fact:     
+        wm_netmask: "{{ lookup('pipe', 'python -c \"import ipaddress; \
+                    print(ipaddress.IPv4Network(\\\"' + address + '\\\", strict=False).netmask)\"') }}"
+
+    - name: Calculate network address
+      ansible.builtin.command: |
+        python -c "
+        import ipaddress
+        ip = ipaddress.IPv4Address('{{ wm_ip }}')
+        netmask = ipaddress.IPv4Address('{{ wm_netmask }}')
+        print(str(ipaddress.IPv4Address(int(ip) & int(netmask))))" 
+      register: network_address
+      no_log: true
+
+    - set_fact:
+        wm_net: "{{ network_address.stdout_lines[0] }}"
+
+    - name: Retrieve Gateway Information
+      uri:
+        url:
+          "{{nb_netbox_url}}/{{nb_ipam_ip_endpoint}}/?description={{nb_gw_ident}}&parent={{wm_net}}/{{wm_mask}}"
+        method: GET
+        headers:
+          Authorization: "Token {{ app_token_netbox }}"
+        validate_certs: no
+      register: gateway_response
+      no_log: true
+      when: nb_net_role != "storage-network"
+
+    - name: Extract Gateway IP
+      set_fact:
+        wm_gw: "{{ item.address.split('/')[0] }}"
+      loop: "{{ gateway_response.json.results }}"
+      no_log: true
+      when: nb_net_role != "storage-network"
+    
+    - name: Current date and time in Swedish format
+      set_fact:
+        swedish_datetime: >
+          {{ansible_date_time.iso8601
+            | regex_replace('T', ' ')
+            | regex_replace('Z', '')}}
+
+    - name: Reserve IP in NetBox
+      uri:
+        url: "{{nb_netbox_url}}/{{nb_ipam_pr_endpoint}}/{{nb_id}}/available-ips/"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+          Authorization: "Token {{ app_token_netbox }}"
+        validate_certs: no
+        body_format: json
+        body:
+          address: "{{ wm_ip }}"
+          status: "active"
+          dns_name: "{{ nb_hostname }}"
+          description: "{{ nb_role }}"     
+          custom_fields:
+            responsible_automation: "{{ nb_automation }}"
+            responsible_user: "{{ nb_user }}"
+            automation_time: "{{ swedish_datetime | trim }}"
+            environment: "{{ nb_env }}"
+            zone: "Z{{ nb_zone }}"
+            tufin_app_sel: "75"           
+          interface: "{{ nb_id }}"
+      register: reserved_ip
+      no_log: true
+      failed_when: reserved_ip.status != 201
+
+    - name: Display Results
+      debug:
+        msg: >
+          IP: {{ wm_ip }}
+          | MASK: {{ wm_netmask }}
+          | GW: {{ wm_gw if nb_net_role != "storage-network" else "N/A" }}
+          | (Reserved IP: {{ reserved_ip.json.address }})
+          | Name: {{ vm_netw_name }}
+
+    rescue:
+      - name: Send mail if no IP is found
+        mail:
+          host: "{{ nb_smtp_server }}"
+          port: 25
+          from: "{{ nb_smtp_from }} (Ansible - {{ nb_automation }})"
+          to:
+            "{{ nb_email_recipients }}"
+          subject: "{{ nb_mailSubject }} ({{ nb_automation }})"
+          subtype: html
+          body: '
+                {{ nb_mailStartTxt }} {{ nb_os }}, Z{{ nb_zone }}, {{ nb_env }}, prefix: {{ nb_id }}.{{ nb_mailEndTxt }}'
+          
+      - name: Fail if no IP is found
+        fail:
+          msg: "No IP found for {{ nb_os }}, Z{{ nb_zone }}, {{ nb_env }}, prefix: {{ nb_id }}."
+        when: wm_ip | length == 0
